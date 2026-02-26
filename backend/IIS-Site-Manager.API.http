@@ -1,0 +1,6 @@
+@IIS_Site_Manager.API_HostAddress = http://localhost:5032
+
+GET {{IIS_Site_Manager.API_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
