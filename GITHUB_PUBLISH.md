@@ -24,26 +24,22 @@ git config --global user.email "你的邮箱@example.com"
 
 ## 4. 推送代码
 
-在 PowerShell 中执行（将 `YOUR_USERNAME` 替换为你的 GitHub 用户名）：
+**本地已初始化并完成首次提交**，只需添加远程仓库并推送：
 
 ```powershell
 cd c:\Users\Administrator\Desktop\hosting_web\IIS-Site-Manager
 
-# 初始化仓库
-git init
-
-# 添加所有文件
-git add .
-
-# 首次提交
-git commit -m "Initial commit: IIS Site Manager with Next.js frontend and .NET 10 backend"
-
-# 添加远程仓库（替换为你的仓库地址）
+# 添加远程（将 YOUR_USERNAME 替换为你的 GitHub 用户名）
 git remote add origin https://github.com/YOUR_USERNAME/IIS-Site-Manager.git
 
-# 推送到 main 分支
+# 推送到 main
 git branch -M main
 git push -u origin main
+```
+
+或使用脚本（替换为你的仓库地址后运行）：
+```powershell
+.\push-to-github.ps1 -RepoUrl "https://github.com/YOUR_USERNAME/IIS-Site-Manager.git"
 ```
 
 ## 5. 若使用 SSH
