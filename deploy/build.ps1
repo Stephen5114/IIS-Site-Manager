@@ -1,57 +1,66 @@
-# 构建部署包
+# IIS-Site-Manager Build Script
+# Builds backend + frontend into deploy/api (single app)
+
 $ErrorActionPreference = "Stop"
-$scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-$projectRoot = Split-Path -Parent $scriptRoot
+$ProjectRoot = Split-Path -Parent $PSScriptRoot
 
-Write-Host "=== 构建 IIS Site Manager 部署包 ===" -ForegroundColor Cyan
+Write-Host "Building IIS-Site-Manager..." -ForegroundColor Cyan
 
-# 1. 发布后端
-Write-Host "`n[1/2] 发布后端..." -ForegroundColor Yellow
-Set-Location (Join-Path $projectRoot "backend")
-dotnet publish -c Release -o (Join-Path $scriptRoot "api")
-if ($LASTEXITCODE -ne 0) { exit 1 }
-Write-Host "后端发布完成." -ForegroundColor Green
+# Stop IIS site and recycle app pool (to release file locks)
+try {
+    Import-Module WebAdministration -ErrorAction SilentlyContinue
+    $site = Get-Website -Name "IIS-Site-Manager" -ErrorAction SilentlyContinue
+    if ($site) {
+        Write-Host "Stopping IIS-Site-Manager site and recycling app pool..." -ForegroundColor Yellow
+        Stop-Website -Name "IIS-Site-Manager"
+        $pool = Get-ChildItem "IIS:\AppPools" -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq "IIS-Site-Manager-API" }
+        if ($pool) { $pool | Stop-WebAppPool }
+        Start-Sleep -Seconds 5
+    }
+} catch { }
 
-# 2. 构建前端（静态导出）
-Write-Host "`n[2/2] 构建前端..." -ForegroundColor Yellow
-Set-Location (Join-Path $projectRoot "frontend")
-$env:NEXT_PUBLIC_API_URL = ""  # 同源，使用相对路径 /api
-npm run build 2>&1 | Out-Null
-if ($LASTEXITCODE -ne 0) {
-    npm run build
-    exit 1
+# Build backend - publish to api_temp then swap (avoids file lock from running IIS)
+Write-Host "`n[1/3] Publishing backend..." -ForegroundColor Yellow
+$apiTemp = "$ProjectRoot\deploy\api_temp"
+$apiDest = "$ProjectRoot\deploy\api"
+Push-Location $ProjectRoot\backend
+dotnet publish -c Release -o $apiTemp --no-self-contained
+if ($LASTEXITCODE -ne 0) { Pop-Location; exit 1 }
+Pop-Location
+# Swap: remove old api, move api_temp to api
+if (Test-Path $apiDest) {
+    Remove-Item $apiDest -Recurse -Force -ErrorAction Stop
 }
+Move-Item -Path $apiTemp -Destination $apiDest -Force
 
-# 复制到 deploy/web
-$webPath = Join-Path $scriptRoot "web"
-if (Test-Path $webPath) { Remove-Item $webPath -Recurse -Force }
-New-Item -ItemType Directory -Path $webPath -Force | Out-Null
-Copy-Item (Join-Path $projectRoot "frontend\out\*") -Destination $webPath -Recurse -Force
+# Ensure logs folder exists (ANCM needs it for stdout)
+$logsDir = Join-Path $apiDest "logs"
+if (-not (Test-Path $logsDir)) { New-Item -ItemType Directory -Path $logsDir -Force | Out-Null }
 
-# 写入 web.config（用于 SPA 路由和 MIME 类型）
-$webConfigPath = Join-Path $webPath "web.config"
-$webConfigContent = @'
-<?xml version="1.0" encoding="UTF-8"?>
-<configuration>
-  <system.webServer>
-    <staticContent>
-      <mimeMap fileExtension=".json" mimeType="application/json" />
-    </staticContent>
-    <defaultDocument>
-      <files>
-        <clear />
-        <add value="index.html" />
-      </files>
-    </defaultDocument>
-  </system.webServer>
-</configuration>
-'@
-Set-Content -Path $webConfigPath -Value $webConfigContent -Encoding UTF8
+# Ensure web.config has stdout logging (logs folder created above)
 
-Write-Host "前端构建完成." -ForegroundColor Green
+# Build frontend
+Write-Host "`n[2/3] Building frontend..." -ForegroundColor Yellow
+Push-Location $ProjectRoot\frontend
+npm run build
+if ($LASTEXITCODE -ne 0) { Pop-Location; exit 1 }
+Pop-Location
 
-Write-Host "`n=== 构建完成 ===" -ForegroundColor Green
-Write-Host "输出目录: $scriptRoot" -ForegroundColor Gray
-Write-Host "  - api\  (后端)" -ForegroundColor Gray
-Write-Host "  - web\  (前端)" -ForegroundColor Gray
-Write-Host "`n运行 setup-iis.ps1 (管理员) 部署到 IIS." -ForegroundColor Cyan
+# Copy frontend into api/wwwroot (single app: API + static frontend)
+Write-Host "`n[3/3] Copying frontend to deploy/api/wwwroot..." -ForegroundColor Yellow
+$outDir = "$ProjectRoot\frontend\out"
+if (-not (Test-Path $outDir)) { Write-Error "Frontend out folder not found. Run 'npm run build' in frontend." }
+$wwwroot = "$apiDest\wwwroot"
+if (Test-Path $wwwroot) { Remove-Item $wwwroot -Recurse -Force }
+Copy-Item -Path $outDir -Destination $wwwroot -Recurse -Force
+
+# Restart site if it was stopped
+try {
+    $site = Get-Website -Name "IIS-Site-Manager" -ErrorAction SilentlyContinue
+    if ($site -and $site.State -ne "Started") {
+        Start-Website -Name "IIS-Site-Manager"
+        Write-Host "Site restarted." -ForegroundColor Green
+    }
+} catch { }
+
+Write-Host "`nBuild complete. Run .\setup-iis.ps1 to deploy to IIS (if not already done)." -ForegroundColor Green

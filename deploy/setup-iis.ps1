@@ -1,110 +1,81 @@
-# IIS 部署脚本 - IIS Site Manager
-# 需要以管理员身份运行
+# IIS-Site-Manager IIS Setup Script
+# Single site: ASP.NET Core serves API (/api/*) + static frontend (/*)
+# Run as Administrator
+
+#Requires -RunAsAdministrator
 
 $ErrorActionPreference = "Stop"
-$deployRoot = $PSScriptRoot
+$DeployRoot = $PSScriptRoot
+$SiteName = "IIS-Site-Manager"
+$Port = 8081
 
-# 配置
-$siteName = "IIS-Site-Manager"
-$appPoolName = "IIS-Site-Manager-Pool"
-$webPath = Join-Path $deployRoot "web"
-$apiPath = Join-Path $deployRoot "api"
-$port = 8081   # 前端端口
-$apiPort = 8082  # 后端 API 独立站点端口（与前端同源部署时使用 /api 应用）
+Write-Host "Setting up IIS for IIS-Site-Manager..." -ForegroundColor Cyan
 
-Write-Host "=== IIS Site Manager 部署 ===" -ForegroundColor Cyan
-Write-Host "部署路径: $deployRoot" -ForegroundColor Gray
-Write-Host ""
-
-# 检查 ASP.NET Core Hosting Bundle
-$hostingBundle = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\ASP.NET Core\Shared Framework\*" -ErrorAction SilentlyContinue
-if (-not $hostingBundle) {
-    Write-Host "警告: 未检测到 ASP.NET Core Hosting Bundle。请先安装 .NET 10 运行时。" -ForegroundColor Yellow
-    Write-Host "下载: https://dotnet.microsoft.com/download/dotnet/10.0" -ForegroundColor Gray
+# Ensure Web Server role
+$webServer = Get-WindowsFeature -Name Web-Server -ErrorAction SilentlyContinue
+if (-not $webServer.Installed) {
+    Write-Host "Installing IIS (Web-Server)..." -ForegroundColor Yellow
+    Install-WindowsFeature -Name Web-Server -IncludeManagementTools
 }
 
-# 导入 WebAdministration 模块
+# Ensure ASP.NET Core Module
+$aspNetModule = Get-WindowsFeature -Name Web-Asp-Net45 -ErrorAction SilentlyContinue
+# For .NET Core hosting, need DotNetCore* or similar - IIS usually has it if .NET SDK installed
+
 Import-Module WebAdministration -ErrorAction SilentlyContinue
-if (-not (Get-Module WebAdministration)) {
-    Write-Host "错误: 无法加载 WebAdministration 模块，请确保 IIS 已安装。" -ForegroundColor Red
-    exit 1
+
+# Remove existing site if present
+$existing = Get-Website -Name $SiteName -ErrorAction SilentlyContinue
+if ($existing) {
+    Write-Host "Removing existing site $SiteName..." -ForegroundColor Yellow
+    Remove-Website -Name $SiteName
 }
 
-# 1. 创建或更新应用程序池（No Managed Code - 用于 ASP.NET Core）
-if (Test-Path "IIS:\AppPools\$appPoolName") {
-    Write-Host "应用程序池 '$appPoolName' 已存在，跳过创建。" -ForegroundColor Yellow
-} else {
-    New-WebAppPool -Name $appPoolName -Force
-    Set-ItemProperty "IIS:\AppPools\$appPoolName" -Name "managedRuntimeVersion" -Value ""
-    Write-Host "已创建应用程序池: $appPoolName" -ForegroundColor Green
+# Create app pool for API (.NET Core - No Managed Code)
+$poolName = "IIS-Site-Manager-API"
+if (-not (Test-Path "IIS:\AppPools\$poolName")) {
+    New-WebAppPool -Name $poolName
 }
+Set-ItemProperty "IIS:\AppPools\$poolName" -Name "managedRuntimeVersion" -Value ""
+# NetworkService has Performance Counter read permission (ApplicationPoolIdentity often returns CPU=0)
+Set-ItemProperty "IIS:\AppPools\$poolName" -Name "processModel.identityType" -Value "NetworkService"
 
-# 2. 创建或更新站点
-if (Test-Path "IIS:\Sites\$siteName") {
-    Write-Host "站点 '$siteName' 已存在，将更新绑定和路径。" -ForegroundColor Yellow
-    Set-ItemProperty "IIS:\Sites\$siteName" -Name physicalPath -Value $webPath
-    Set-ItemProperty "IIS:\Sites\$siteName" -Name applicationPool -Value $appPoolName
-} else {
-    New-Website -Name $siteName -PhysicalPath $webPath -ApplicationPool $appPoolName -Port $port -Force
-    Write-Host "已创建站点: $siteName (端口 $port)" -ForegroundColor Green
-}
+# Grant Performance Counter read permission (backup for ApplicationPoolIdentity)
+$perfUser = "IIS AppPool\$poolName"
+try {
+    Add-LocalGroupMember -Group "Performance Monitor Users" -Member $perfUser -ErrorAction SilentlyContinue
+    Write-Host "Added $perfUser to Performance Monitor Users (for CPU metrics)" -ForegroundColor Gray
+} catch { }
 
-# 3. 添加 API 应用程序
-if (-not (Test-Path $webPath)) {
-    Write-Host "错误: 前端路径不存在: $webPath" -ForegroundColor Red
-    Write-Host "请先运行 build.ps1 生成部署文件。" -ForegroundColor Gray
-    exit 1
-}
+# Single site: ASP.NET Core app serves both API and static frontend
+$apiPath = Join-Path $DeployRoot "api"
+$wwwroot = Join-Path $apiPath "wwwroot"
 
-if (-not (Test-Path $apiPath)) {
-    Write-Host "错误: 后端路径不存在: $apiPath" -ForegroundColor Red
-    Write-Host "请先运行 build.ps1 生成部署文件。" -ForegroundColor Gray
-    exit 1
-}
+if (-not (Test-Path $apiPath)) { Write-Error "deploy/api not found. Run build.ps1 first." }
+if (-not (Test-Path $wwwroot)) { Write-Error "deploy/api/wwwroot not found. Run build.ps1 first." }
 
-# 添加 /api 应用程序 或 创建独立 API 站点
-$useSeparateApiSite = $false  # true=独立站点(8082), false=同站点的/api应用
-if ($useSeparateApiSite) {
-    $apiSiteName = "IIS-Site-Manager-API"
-    if (Test-Path "IIS:\Sites\$apiSiteName") {
-        Set-ItemProperty "IIS:\Sites\$apiSiteName" -Name physicalPath -Value $apiPath
-        Write-Host "API 站点已存在，已更新路径。" -ForegroundColor Yellow
-    } else {
-        New-Website -Name $apiSiteName -PhysicalPath $apiPath -ApplicationPool $appPoolName -Port $apiPort -Force
-        Write-Host "已创建 API 站点: $apiSiteName (端口 $apiPort)" -ForegroundColor Green
-    }
-} else {
-    $apiAppPath = "IIS:\Sites\$siteName\api"
-    if (Test-Path $apiAppPath) {
-        Set-ItemProperty $apiAppPath -Name physicalPath -Value $apiPath
-        Write-Host "API 应用程序已存在，更新路径。" -ForegroundColor Yellow
-    } else {
-        New-WebApplication -Site $siteName -Name "api" -PhysicalPath $apiPath -ApplicationPool $appPoolName
-        Write-Host "已添加 API 应用程序: /api" -ForegroundColor Green
-    }
-}
+# Create site - single app (no sub-application)
+New-Website -Name $SiteName -PhysicalPath $apiPath -Port $Port -ApplicationPool $poolName
+# Replace binding with *:port for remote access
+Get-WebBinding -Name $SiteName -Protocol "http" | Remove-WebBinding
+New-WebBinding -Name $SiteName -Protocol "http" -Port $Port -IPAddress "*"
 
-# 4. 确保 API 应用池支持 .NET Core
-Set-ItemProperty "IIS:\AppPools\$appPoolName" -Name "managedRuntimeVersion" -Value ""
+# Allow port in Windows Firewall for remote access
+$firewallRule = "IIS-Site-Manager-$Port"
+New-NetFirewallRule -DisplayName $firewallRule -Direction Inbound -Protocol TCP -LocalPort $Port -Action Allow -ErrorAction SilentlyContinue | Out-Null
 
-# 5. 授予 IIS 读取权限
-$acl = Get-Acl $deployRoot
-$identity = "IIS_IUSRS"
-$fileSystemRights = [System.Security.AccessControl.FileSystemRights]::ReadAndExecute
-$type = [System.Security.AccessControl.AccessControlType]::Allow
-$inheritance = [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [System.Security.AccessControl.InheritanceFlags]::ObjectInherit
-$perm = New-Object System.Security.AccessControl.FileSystemAccessRule($identity, $fileSystemRights, $inheritance, "None", $type)
-$acl.SetAccessRule($perm)
-Set-Acl -Path $deployRoot -AclObject $acl -ErrorAction SilentlyContinue
-Write-Host "已设置 IIS_IUSRS 读取权限." -ForegroundColor Green
+$hostname = [System.Net.Dns]::GetHostName()
+$remoteUrl = "http://${hostname}:$Port"
+# Try to get primary IP for remote access
+$ip = (Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.InterfaceAlias -notlike "*Loopback*" -and $_.IPAddress -notlike "169.*" } | Select-Object -First 1).IPAddress
+Write-Host "`nIIS setup complete. Binding: *:$Port (all interfaces)" -ForegroundColor Green
+Write-Host "  Local:   http://localhost:$Port" -ForegroundColor White
+Write-Host "  Remote:  $remoteUrl" -ForegroundColor White
+if ($ip) { Write-Host "  Or:      http://${ip}:$Port" -ForegroundColor White }
+Write-Host "  API:     $remoteUrl/api" -ForegroundColor White
 
-Write-Host ""
-Write-Host "=== 部署完成 ===" -ForegroundColor Green
-Write-Host "前端地址: http://localhost:$port" -ForegroundColor Cyan
-if ($useSeparateApiSite) {
-    Write-Host "API 地址:  http://localhost:$apiPort (需修改 frontend .env 并重新 build)" -ForegroundColor Cyan
-} else {
-    Write-Host "API 地址:  http://localhost:$port/api" -ForegroundColor Cyan
-}
-Write-Host ""
-Write-Host "注意: 创建 IIS 站点功能需要应用程序池以高权限运行（管理员）。" -ForegroundColor Yellow
+# Restart app pool so new Performance Monitor Users permission takes effect
+Start-Sleep -Seconds 2
+try { Stop-WebAppPool -Name $poolName -ErrorAction Stop; Start-Sleep -Seconds 2; Start-WebAppPool -Name $poolName }
+catch { try { Start-WebAppPool -Name $poolName } catch { } }
+Write-Host "`nApp pool recycled (for CPU permission to take effect)" -ForegroundColor Gray

@@ -32,7 +32,7 @@ function formatBytes(bytes: number): string {
 
 export default function Home() {
   const [metrics, setMetrics] = useState<SystemMetrics | null>(null);
-  const [metricsHistory, setMetricsHistory] = useState<{ time: string; cpu: number; ram: number }[]>([]);
+  const [metricsHistory, setMetricsHistory] = useState<{ time: string; cpu: number; ram: number; bandwidth: number }[]>([]);
   const [sites, setSites] = useState<IISSite[]>([]);
   const [loading, setLoading] = useState(true);
   const [createStatus, setCreateStatus] = useState<{ type: 'success' | 'error'; msg: string } | null>(null);
@@ -53,7 +53,12 @@ export default function Home() {
         setMetricsHistory((prev) => {
           const next = [
             ...prev.slice(-59),
-            { time: new Date().toLocaleTimeString(), cpu: m.cpuUsagePercent, ram: m.memoryUsagePercent },
+            {
+              time: new Date().toLocaleTimeString(),
+              cpu: m.cpuUsagePercent,
+              ram: m.memoryUsagePercent,
+              bandwidth: m.bytesTotalPerSec ?? 0,
+            },
           ];
           return next.length > 60 ? next.slice(-60) : next;
         });
@@ -98,7 +103,7 @@ export default function Home() {
       <header className="border-b border-slate-800 bg-slate-900/80 backdrop-blur">
         <div className="mx-auto max-w-7xl px-4 py-4 sm:px-6 lg:px-8">
           <h1 className="text-xl font-bold tracking-tight">IIS Site Manager</h1>
-          <p className="mt-1 text-sm text-slate-400">Create sites · Monitor CPU & RAM</p>
+          <p className="mt-1 text-sm text-slate-400">Create sites · Monitor CPU, RAM & Bandwidth</p>
         </div>
       </header>
 
@@ -111,7 +116,7 @@ export default function Home() {
               Loading metrics...
             </div>
           ) : metrics ? (
-            <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-4">
+            <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-7">
               <div className="rounded-xl border border-slate-800 bg-slate-900/50 p-5">
                 <p className="text-sm text-slate-400">CPU Usage</p>
                 <p className="mt-1 text-2xl font-bold text-emerald-400">{metrics.cpuUsagePercent.toFixed(1)}%</p>
@@ -128,32 +133,62 @@ export default function Home() {
                 <p className="text-sm text-slate-400">Memory Total</p>
                 <p className="mt-1 text-2xl font-bold">{formatBytes(metrics.memoryTotalBytes)}</p>
               </div>
+              <div className="rounded-xl border border-slate-800 bg-slate-900/50 p-5">
+                <p className="text-sm text-slate-400">Bandwidth (Total)</p>
+                <p className="mt-1 text-2xl font-bold text-cyan-400">{formatBytes(metrics.bytesTotalPerSec ?? 0)}/s</p>
+              </div>
+              <div className="rounded-xl border border-slate-800 bg-slate-900/50 p-5">
+                <p className="text-sm text-slate-400">Received</p>
+                <p className="mt-1 text-2xl font-bold text-amber-400">{formatBytes(metrics.bytesReceivedPerSec ?? 0)}/s</p>
+              </div>
+              <div className="rounded-xl border border-slate-800 bg-slate-900/50 p-5">
+                <p className="text-sm text-slate-400">Sent</p>
+                <p className="mt-1 text-2xl font-bold text-rose-400">{formatBytes(metrics.bytesSentPerSec ?? 0)}/s</p>
+              </div>
             </div>
           ) : (
             <div className="rounded-xl border border-amber-900/50 bg-amber-950/30 p-8 text-center text-amber-200">
-              Unable to connect to API. Ensure backend is running at{' '}
-              <code className="rounded bg-slate-800 px-1">localhost:5032</code>.
+              Unable to connect to API. Ensure backend is running.
             </div>
           )}
 
           {metricsHistory.length > 0 && (
-            <div className="mt-6 rounded-xl border border-slate-800 bg-slate-900/50 p-4">
-              <p className="mb-3 text-sm text-slate-400">CPU & RAM over time (last 60 samples)</p>
-              <div className="h-48">
-                <ResponsiveContainer width="100%" height="100%">
-                  <AreaChart data={metricsHistory}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
-                    <XAxis dataKey="time" stroke="#94a3b8" fontSize={11} />
-                    <YAxis stroke="#94a3b8" domain={[0, 100]} unit="%" />
-                    <Tooltip
-                      contentStyle={{ backgroundColor: '#1e293b', border: '1px solid #334155', borderRadius: '8px' }}
-                    />
-                    <Area type="monotone" dataKey="cpu" stroke="#10b981" fill="#10b981" fillOpacity={0.2} />
-                    <Area type="monotone" dataKey="ram" stroke="#6366f1" fill="#6366f1" fillOpacity={0.2} />
-                  </AreaChart>
-                </ResponsiveContainer>
+            <>
+              <div className="mt-6 rounded-xl border border-slate-800 bg-slate-900/50 p-4">
+                <p className="mb-3 text-sm text-slate-400">CPU & RAM over time (last 60 samples)</p>
+                <div className="h-48">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <AreaChart data={metricsHistory}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
+                      <XAxis dataKey="time" stroke="#94a3b8" fontSize={11} />
+                      <YAxis stroke="#94a3b8" domain={[0, 100]} unit="%" />
+                      <Tooltip
+                        contentStyle={{ backgroundColor: '#1e293b', border: '1px solid #334155', borderRadius: '8px' }}
+                      />
+                      <Area type="monotone" dataKey="cpu" stroke="#10b981" fill="#10b981" fillOpacity={0.2} />
+                      <Area type="monotone" dataKey="ram" stroke="#6366f1" fill="#6366f1" fillOpacity={0.2} />
+                    </AreaChart>
+                  </ResponsiveContainer>
+                </div>
               </div>
-            </div>
+              <div className="mt-6 rounded-xl border border-slate-800 bg-slate-900/50 p-4">
+                <p className="mb-3 text-sm text-slate-400">IIS Bandwidth over time (last 60 samples)</p>
+                <div className="h-48">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <AreaChart data={metricsHistory}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
+                      <XAxis dataKey="time" stroke="#94a3b8" fontSize={11} />
+                      <YAxis stroke="#94a3b8" tickFormatter={(v) => formatBytes(v)} />
+                      <Tooltip
+                        contentStyle={{ backgroundColor: '#1e293b', border: '1px solid #334155', borderRadius: '8px' }}
+                        formatter={(v: number | undefined) => [v != null ? formatBytes(v) + '/s' : '-', 'Bandwidth']}
+                      />
+                      <Area type="monotone" dataKey="bandwidth" stroke="#06b6d4" fill="#06b6d4" fillOpacity={0.2} />
+                    </AreaChart>
+                  </ResponsiveContainer>
+                </div>
+              </div>
+            </>
           )}
 
           {pieData.length > 0 && (

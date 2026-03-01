@@ -5,5 +5,8 @@ public record SystemMetrics(
     double MemoryUsagePercent,
     long MemoryUsedBytes,
     long MemoryTotalBytes,
+    double BytesReceivedPerSec,
+    double BytesSentPerSec,
+    double BytesTotalPerSec,
     DateTime Timestamp
 );

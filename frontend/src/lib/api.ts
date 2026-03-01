@@ -1,8 +1,11 @@
 function getApiBase(): string {
   const envUrl = process.env.NEXT_PUBLIC_API_URL?.trim();
   if (envUrl) return envUrl;
-  if (typeof window !== 'undefined')
-    return `${window.location.protocol}//${window.location.hostname}:5032`;
+  // Dev (port 3000): backend on 5032; IIS/production: use relative path (same origin)
+  if (typeof window !== 'undefined') {
+    if (window.location.port === '3000') return 'http://localhost:5032';
+    return ''; // relative URL -> /api/* always works for same-origin
+  }
   return 'http://localhost:5032';
 }
 const API_BASE = getApiBase();
@@ -12,6 +15,9 @@ export interface SystemMetrics {
   memoryUsagePercent: number;
   memoryUsedBytes: number;
   memoryTotalBytes: number;
+  bytesReceivedPerSec: number;
+  bytesSentPerSec: number;
+  bytesTotalPerSec: number;
   timestamp: string;
 }
 
