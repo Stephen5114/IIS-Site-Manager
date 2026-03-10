@@ -59,6 +59,49 @@ For local or remote Windows Service setup, use one of:
 Both scripts write `appsettings.Production.json` for the agent and configure the service to start with `--environment Production`.
 Default service account is now `LocalSystem`, because `LocalService` does not have enough IIS configuration access for `Microsoft.Web.Administration` based provisioning on the remote node.
 
+## Production Acceptance Check
+
+The canonical post-deploy verification is:
+
+```powershell
+$env:IIS_SMOKE_ADMIN_USERNAME = "<admin-username>"
+$env:IIS_SMOKE_ADMIN_PASSWORD = "<admin-password>"
+$env:IIS_SMOKE_WINRM_USERNAME = "<winrm-username>"
+$env:IIS_SMOKE_WINRM_PASSWORD = "<winrm-password>"
+.\deploy\run-production-acceptance.ps1
+```
+
+Required environment variables:
+
+- `IIS_SMOKE_ADMIN_USERNAME`
+- `IIS_SMOKE_ADMIN_PASSWORD`
+- `IIS_SMOKE_WINRM_USERNAME`
+- `IIS_SMOKE_WINRM_PASSWORD`
+
+Optional environment variables:
+
+- `IIS_SMOKE_WINRM_PORT` default `5985`
+- `IIS_SMOKE_WINRM_AUTH` default `Basic`
+- `IIS_SMOKE_SQL_CONNECTION` optional cleanup override if the script cannot read the local production API connection string
+
+What the script verifies:
+
+- backend health responds
+- admin login succeeds through `/api/admin/login`
+- customer registration succeeds
+- admin approval succeeds through the protected admin API
+- site queueing succeeds through the protected admin API
+- provisioning reaches `succeeded`
+- the remote IIS site exists, is started, and has its expected `index.html`
+
+Cleanup behavior:
+
+- default: keep successful test artifacts and print a machine-readable summary for traceability
+- `-CleanupOnSuccess`: also remove the created customer, site, jobs, and remote IIS artifacts
+- failed runs always attempt best-effort cleanup of the artifacts created in that run
+
+Use this script after backend deploys, agent deploys, service-account changes, or node maintenance. It is the primary proof that the admin approval and provisioning path still works end to end.
+
 ## Operational Notes
 
 - Stop the backend app pool before rebuilding if you hit file lock issues.
