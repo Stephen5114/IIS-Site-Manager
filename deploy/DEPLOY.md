@@ -57,6 +57,7 @@ For local or remote Windows Service setup, use one of:
 - `deploy/install-agent-service.ps1`
 
 Both scripts write `appsettings.Production.json` for the agent and configure the service to start with `--environment Production`.
+Default service account is now `LocalSystem`, because `LocalService` does not have enough IIS configuration access for `Microsoft.Web.Administration` based provisioning on the remote node.
 
 ## Operational Notes
 

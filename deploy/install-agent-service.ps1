@@ -12,7 +12,7 @@ param(
     [int]$MetricsIntervalSeconds = 15,
     [int]$JobPollIntervalSeconds = 10,
     [int]$RequestTimeoutSeconds = 10,
-    [string]$ServiceAccount = "NT AUTHORITY\LocalService"
+    [string]$ServiceAccount = "LocalSystem"
 )
 
 $ErrorActionPreference = "Stop"

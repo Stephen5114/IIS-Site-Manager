@@ -12,7 +12,8 @@ param(
     [bool]$Enabled = $true,
     [int]$MetricsIntervalSeconds = 15,
     [int]$JobPollIntervalSeconds = 10,
-    [int]$RequestTimeoutSeconds = 10
+    [int]$RequestTimeoutSeconds = 10,
+    [string]$ServiceAccount = "LocalSystem"
 )
 
 $ErrorActionPreference = "Stop"
@@ -57,8 +58,10 @@ else {
     throw "Publish output is missing both exe and dll."
 }
 
-Write-Host "Granting read access to LocalService..." -ForegroundColor Cyan
-icacls $PublishDir /grant "NT AUTHORITY\LocalService:(OI)(CI)RX" /T | Out-Null
+Write-Host "Granting read access to service account..." -ForegroundColor Cyan
+if ($ServiceAccount -like 'NT AUTHORITY\*') {
+    icacls $PublishDir /grant "$ServiceAccount:(OI)(CI)RX" /T | Out-Null
+}
 
 $existing = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
 if ($existing) {
@@ -68,11 +71,11 @@ if ($existing) {
         Start-Sleep -Seconds 2
     }
 
-    sc.exe config $ServiceName binPath= "$binPath" start= auto obj= "NT AUTHORITY\LocalService" DisplayName= "$DisplayName" | Out-Null
+    sc.exe config $ServiceName binPath= "$binPath" start= auto obj= "$ServiceAccount" DisplayName= "$DisplayName" | Out-Null
 }
 else {
     Write-Host "Creating service..." -ForegroundColor Yellow
-    sc.exe create $ServiceName binPath= "$binPath" start= auto obj= "NT AUTHORITY\LocalService" DisplayName= "$DisplayName" | Out-Null
+    sc.exe create $ServiceName binPath= "$binPath" start= auto obj= "$ServiceAccount" DisplayName= "$DisplayName" | Out-Null
 }
 
 sc.exe description $ServiceName $Description | Out-Null
@@ -88,3 +91,4 @@ Write-Host "Service '$ServiceName' is $($svc.Status)." -ForegroundColor Green
 Write-Host "PublishDir: $PublishDir" -ForegroundColor Gray
 Write-Host "BackendBaseUrl: $BackendBaseUrl" -ForegroundColor Gray
 Write-Host "NodeName: $NodeName | PublicHost: $PublicHost" -ForegroundColor Gray
+Write-Host "ServiceAccount: $ServiceAccount" -ForegroundColor Gray
