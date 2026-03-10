@@ -1,81 +1,114 @@
-# IIS-Site-Manager IIS Setup Script
-# Single site: ASP.NET Core serves API (/api/*) + static frontend (/*)
-# Run as Administrator
-
 #Requires -RunAsAdministrator
+
+param(
+    [string]$BackendSiteName = "IIS-Site-Manager-Backend",
+    [string]$BackendPoolName = "IIS-Site-Manager-Backend-Pool",
+    [int]$BackendPort = 5032,
+    [string]$FrontendSiteName = "IIS-Site-Manager-Frontend",
+    [string]$FrontendPoolName = "IIS-Site-Manager-Frontend-Pool",
+    [int]$FrontendPort = 8082,
+    [string]$AspNetCoreEnvironment = "Production",
+    [switch]$RemoveLegacySingleSite
+)
 
 $ErrorActionPreference = "Stop"
 $DeployRoot = $PSScriptRoot
-$SiteName = "IIS-Site-Manager"
-$Port = 8081
+$BackendPath = Join-Path $DeployRoot "api"
+$FrontendPath = Join-Path $DeployRoot "web"
 
-Write-Host "Setting up IIS for IIS-Site-Manager..." -ForegroundColor Cyan
+Write-Host "Setting up IIS for split backend/frontend deployment..." -ForegroundColor Cyan
 
-# Ensure Web Server role
+Import-Module ServerManager -ErrorAction SilentlyContinue
 $webServer = Get-WindowsFeature -Name Web-Server -ErrorAction SilentlyContinue
-if (-not $webServer.Installed) {
+if ($webServer -and -not $webServer.Installed) {
     Write-Host "Installing IIS (Web-Server)..." -ForegroundColor Yellow
     Install-WindowsFeature -Name Web-Server -IncludeManagementTools
 }
 
-# Ensure ASP.NET Core Module
-$aspNetModule = Get-WindowsFeature -Name Web-Asp-Net45 -ErrorAction SilentlyContinue
-# For .NET Core hosting, need DotNetCore* or similar - IIS usually has it if .NET SDK installed
+Import-Module WebAdministration -ErrorAction Stop
 
-Import-Module WebAdministration -ErrorAction SilentlyContinue
-
-# Remove existing site if present
-$existing = Get-Website -Name $SiteName -ErrorAction SilentlyContinue
-if ($existing) {
-    Write-Host "Removing existing site $SiteName..." -ForegroundColor Yellow
-    Remove-Website -Name $SiteName
+if (-not (Test-Path $BackendPath)) {
+    throw "Backend deploy path not found: $BackendPath. Run .\build.ps1 first."
 }
 
-# Create app pool for API (.NET Core - No Managed Code)
-$poolName = "IIS-Site-Manager-API"
-if (-not (Test-Path "IIS:\AppPools\$poolName")) {
-    New-WebAppPool -Name $poolName
+if (-not (Test-Path $FrontendPath)) {
+    throw "Frontend deploy path not found: $FrontendPath. Run .\build.ps1 first."
 }
-Set-ItemProperty "IIS:\AppPools\$poolName" -Name "managedRuntimeVersion" -Value ""
-# NetworkService has Performance Counter read permission (ApplicationPoolIdentity often returns CPU=0)
-Set-ItemProperty "IIS:\AppPools\$poolName" -Name "processModel.identityType" -Value "NetworkService"
 
-# Grant Performance Counter read permission (backup for ApplicationPoolIdentity)
-$perfUser = "IIS AppPool\$poolName"
+if ($RemoveLegacySingleSite) {
+    $legacySite = Get-Website -Name "IIS-Site-Manager" -ErrorAction SilentlyContinue
+    if ($legacySite) {
+        Write-Host "Removing legacy single-site deployment 'IIS-Site-Manager'..." -ForegroundColor Yellow
+        Remove-Website -Name "IIS-Site-Manager"
+    }
+}
+
+foreach ($poolName in @($BackendPoolName, $FrontendPoolName)) {
+    if (-not (Test-Path "IIS:\AppPools\$poolName")) {
+        New-WebAppPool -Name $poolName | Out-Null
+    }
+}
+
+Set-ItemProperty "IIS:\AppPools\$BackendPoolName" -Name "managedRuntimeVersion" -Value ""
+Set-ItemProperty "IIS:\AppPools\$BackendPoolName" -Name "processModel.identityType" -Value "NetworkService"
+
+Set-ItemProperty "IIS:\AppPools\$FrontendPoolName" -Name "managedRuntimeVersion" -Value ""
+Set-ItemProperty "IIS:\AppPools\$FrontendPoolName" -Name "processModel.identityType" -Value "ApplicationPoolIdentity"
+
 try {
-    Add-LocalGroupMember -Group "Performance Monitor Users" -Member $perfUser -ErrorAction SilentlyContinue
-    Write-Host "Added $perfUser to Performance Monitor Users (for CPU metrics)" -ForegroundColor Gray
-} catch { }
+    Add-LocalGroupMember -Group "Performance Monitor Users" -Member "IIS AppPool\$BackendPoolName" -ErrorAction SilentlyContinue
+}
+catch {
+}
 
-# Single site: ASP.NET Core app serves both API and static frontend
-$apiPath = Join-Path $DeployRoot "api"
-$wwwroot = Join-Path $apiPath "wwwroot"
+foreach ($siteName in @($BackendSiteName, $FrontendSiteName)) {
+    $site = Get-Website -Name $siteName -ErrorAction SilentlyContinue
+    if ($site) {
+        Write-Host "Removing existing site '$siteName'..." -ForegroundColor Yellow
+        Remove-Website -Name $siteName
+    }
+}
 
-if (-not (Test-Path $apiPath)) { Write-Error "deploy/api not found. Run build.ps1 first." }
-if (-not (Test-Path $wwwroot)) { Write-Error "deploy/api/wwwroot not found. Run build.ps1 first." }
+Write-Host "Creating backend site '$BackendSiteName' on port $BackendPort..." -ForegroundColor Yellow
+New-Website -Name $BackendSiteName -PhysicalPath $BackendPath -Port $BackendPort -ApplicationPool $BackendPoolName | Out-Null
+Get-WebBinding -Name $BackendSiteName -Protocol "http" | Remove-WebBinding
+New-WebBinding -Name $BackendSiteName -Protocol "http" -Port $BackendPort -IPAddress "*" | Out-Null
 
-# Create site - single app (no sub-application)
-New-Website -Name $SiteName -PhysicalPath $apiPath -Port $Port -ApplicationPool $poolName
-# Replace binding with *:port for remote access
-Get-WebBinding -Name $SiteName -Protocol "http" | Remove-WebBinding
-New-WebBinding -Name $SiteName -Protocol "http" -Port $Port -IPAddress "*"
+Write-Host "Creating frontend site '$FrontendSiteName' on port $FrontendPort..." -ForegroundColor Yellow
+New-Website -Name $FrontendSiteName -PhysicalPath $FrontendPath -Port $FrontendPort -ApplicationPool $FrontendPoolName | Out-Null
+Get-WebBinding -Name $FrontendSiteName -Protocol "http" | Remove-WebBinding
+New-WebBinding -Name $FrontendSiteName -Protocol "http" -Port $FrontendPort -IPAddress "*" | Out-Null
 
-# Allow port in Windows Firewall for remote access
-$firewallRule = "IIS-Site-Manager-$Port"
-New-NetFirewallRule -DisplayName $firewallRule -Direction Inbound -Protocol TCP -LocalPort $Port -Action Allow -ErrorAction SilentlyContinue | Out-Null
+$appCmd = Join-Path $env:SystemRoot "System32\inetsrv\appcmd.exe"
+if (Test-Path $appCmd) {
+    & $appCmd set config $BackendSiteName -section:system.webServer/aspNetCore "/-[environmentVariables.[name='ASPNETCORE_ENVIRONMENT']]" /commit:apphost 2>$null | Out-Null
+    & $appCmd set config $BackendSiteName -section:system.webServer/aspNetCore "/+[environmentVariables.[name='ASPNETCORE_ENVIRONMENT',value='$AspNetCoreEnvironment']]" /commit:apphost | Out-Null
+}
+
+foreach ($rule in @(
+    @{ Name = "IIS-Site-Manager-Backend-$BackendPort"; Port = $BackendPort },
+    @{ Name = "IIS-Site-Manager-Frontend-$FrontendPort"; Port = $FrontendPort }
+)) {
+    New-NetFirewallRule -DisplayName $rule.Name -Direction Inbound -Protocol TCP -LocalPort $rule.Port -Action Allow -ErrorAction SilentlyContinue | Out-Null
+}
+
+Start-WebAppPool -Name $BackendPoolName -ErrorAction SilentlyContinue
+Start-WebAppPool -Name $FrontendPoolName -ErrorAction SilentlyContinue
+Start-Website -Name $BackendSiteName -ErrorAction SilentlyContinue
+Start-Website -Name $FrontendSiteName -ErrorAction SilentlyContinue
 
 $hostname = [System.Net.Dns]::GetHostName()
-$remoteUrl = "http://${hostname}:$Port"
-# Try to get primary IP for remote access
-$ip = (Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.InterfaceAlias -notlike "*Loopback*" -and $_.IPAddress -notlike "169.*" } | Select-Object -First 1).IPAddress
-Write-Host "`nIIS setup complete. Binding: *:$Port (all interfaces)" -ForegroundColor Green
-Write-Host "  Local:   http://localhost:$Port" -ForegroundColor White
-Write-Host "  Remote:  $remoteUrl" -ForegroundColor White
-if ($ip) { Write-Host "  Or:      http://${ip}:$Port" -ForegroundColor White }
-Write-Host "  API:     $remoteUrl/api" -ForegroundColor White
+$ip = (Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+    Where-Object { $_.InterfaceAlias -notlike "*Loopback*" -and $_.IPAddress -notlike "169.*" } |
+    Select-Object -First 1).IPAddress
 
-# Restart app pool so new Performance Monitor Users permission takes effect
-Start-Sleep -Seconds 2
-try { Stop-WebAppPool -Name $poolName -ErrorAction Stop; Start-Sleep -Seconds 2; Start-WebAppPool -Name $poolName }
-catch { try { Start-WebAppPool -Name $poolName } catch { } }
-Write-Host "`nApp pool recycled (for CPU permission to take effect)" -ForegroundColor Gray
+Write-Host "`nIIS setup complete." -ForegroundColor Green
+Write-Host "  Backend:  http://localhost:$BackendPort" -ForegroundColor White
+Write-Host "  Frontend: http://localhost:$FrontendPort" -ForegroundColor White
+Write-Host "  Backend env: ASPNETCORE_ENVIRONMENT=$AspNetCoreEnvironment" -ForegroundColor White
+if ($ip) {
+    Write-Host "  Remote backend:  http://${ip}:$BackendPort" -ForegroundColor White
+    Write-Host "  Remote frontend: http://${ip}:$FrontendPort" -ForegroundColor White
+}
+Write-Host "  Host backend:  http://${hostname}:$BackendPort" -ForegroundColor White
+Write-Host "  Host frontend: http://${hostname}:$FrontendPort" -ForegroundColor White

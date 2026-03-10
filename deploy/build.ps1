@@ -1,66 +1,149 @@
 # IIS-Site-Manager Build Script
-# Builds backend + frontend into deploy/api (single app)
+# Builds backend, frontend, and agent into separate deploy folders.
 
 $ErrorActionPreference = "Stop"
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
 
-Write-Host "Building IIS-Site-Manager..." -ForegroundColor Cyan
+$env:DOTNET_CLI_HOME = Join-Path $ProjectRoot ".dotnet"
+$env:DOTNET_SKIP_FIRST_TIME_EXPERIENCE = "1"
+$env:APPDATA = Join-Path $ProjectRoot ".appdata"
+$env:NUGET_PACKAGES = Join-Path $ProjectRoot ".nuget\packages"
+$nugetConfig = Join-Path $ProjectRoot "NuGet.Config"
 
-# Stop IIS site and recycle app pool (to release file locks)
-try {
-    Import-Module WebAdministration -ErrorAction SilentlyContinue
-    $site = Get-Website -Name "IIS-Site-Manager" -ErrorAction SilentlyContinue
-    if ($site) {
-        Write-Host "Stopping IIS-Site-Manager site and recycling app pool..." -ForegroundColor Yellow
-        Stop-Website -Name "IIS-Site-Manager"
-        $pool = Get-ChildItem "IIS:\AppPools" -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq "IIS-Site-Manager-API" }
-        if ($pool) { $pool | Stop-WebAppPool }
-        Start-Sleep -Seconds 5
+$backendSiteName = "IIS-Site-Manager-Backend"
+$backendPoolName = "IIS-Site-Manager-Backend-Pool"
+$frontendSiteName = "IIS-Site-Manager-Frontend"
+$frontendPoolName = "IIS-Site-Manager-Frontend-Pool"
+
+function Stop-IisIfPresent {
+    param(
+        [string]$SiteName,
+        [string]$PoolName
+    )
+
+    try {
+        Import-Module WebAdministration -ErrorAction SilentlyContinue
+
+        $site = Get-Website -Name $SiteName -ErrorAction SilentlyContinue
+        if ($site) {
+            Write-Host "Stopping site '$SiteName'..." -ForegroundColor Yellow
+            Stop-Website -Name $SiteName
+        }
+
+        if (Test-Path "IIS:\AppPools\$PoolName") {
+            Write-Host "Stopping app pool '$PoolName'..." -ForegroundColor Yellow
+            Stop-WebAppPool -Name $PoolName -ErrorAction SilentlyContinue
+        }
     }
-} catch { }
+    catch {
+        Write-Warning "Unable to stop IIS resources for $SiteName / ${PoolName}: $($_.Exception.Message)"
+    }
+}
 
-# Build backend - publish to api_temp then swap (avoids file lock from running IIS)
-Write-Host "`n[1/3] Publishing backend..." -ForegroundColor Yellow
-$apiTemp = "$ProjectRoot\deploy\api_temp"
-$apiDest = "$ProjectRoot\deploy\api"
-Push-Location $ProjectRoot\backend
-dotnet publish -c Release -o $apiTemp --no-self-contained
+function Restart-IisIfPresent {
+    param(
+        [string]$SiteName,
+        [string]$PoolName
+    )
+
+    try {
+        Import-Module WebAdministration -ErrorAction SilentlyContinue
+
+        if (Test-Path "IIS:\AppPools\$PoolName") {
+            Start-WebAppPool -Name $PoolName -ErrorAction SilentlyContinue
+        }
+
+        $site = Get-Website -Name $SiteName -ErrorAction SilentlyContinue
+        if ($site -and $site.State -ne "Started") {
+            Start-Website -Name $SiteName
+        }
+    }
+    catch {
+        Write-Warning "Unable to restart IIS resources for $SiteName / ${PoolName}: $($_.Exception.Message)"
+    }
+}
+
+function Replace-DirectoryPreservingProductionConfig {
+    param(
+        [string]$SourcePath,
+        [string]$DestinationPath
+    )
+
+    $backupProductionConfig = $null
+    $productionConfigPath = Join-Path $DestinationPath "appsettings.Production.json"
+    if (Test-Path $productionConfigPath) {
+        $backupProductionConfig = Get-Content -Raw $productionConfigPath
+    }
+
+    if (-not (Test-Path $DestinationPath)) {
+        New-Item -ItemType Directory -Path $DestinationPath -Force | Out-Null
+    }
+
+    Get-ChildItem -Path $DestinationPath -Force | ForEach-Object {
+        if ($_.Name -ne "appsettings.Production.json") {
+            Remove-Item $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    Get-ChildItem -Path $SourcePath -Force | ForEach-Object {
+        Move-Item -Path $_.FullName -Destination $DestinationPath -Force
+    }
+
+    Remove-Item $SourcePath -Recurse -Force -ErrorAction SilentlyContinue
+
+    if ($backupProductionConfig) {
+        Set-Content -Path (Join-Path $DestinationPath "appsettings.Production.json") -Value $backupProductionConfig -Encoding UTF8
+    }
+}
+
+Write-Host "Building IIS-Site-Manager deployment artifacts..." -ForegroundColor Cyan
+
+Stop-IisIfPresent -SiteName $backendSiteName -PoolName $backendPoolName
+Stop-IisIfPresent -SiteName $frontendSiteName -PoolName $frontendPoolName
+Start-Sleep -Seconds 2
+
+$apiTemp = Join-Path $ProjectRoot "deploy\api_temp"
+$apiDest = Join-Path $ProjectRoot "deploy\api"
+$webTemp = Join-Path $ProjectRoot "deploy\web_temp"
+$webDest = Join-Path $ProjectRoot "deploy\web"
+$agentDest = Join-Path $ProjectRoot "deploy\agent"
+
+if (Test-Path $apiTemp) { Remove-Item $apiTemp -Recurse -Force }
+if (Test-Path $webTemp) { Remove-Item $webTemp -Recurse -Force }
+
+Write-Host "`n[1/4] Publishing backend to deploy/api..." -ForegroundColor Yellow
+Push-Location (Join-Path $ProjectRoot "backend")
+dotnet publish -c Release -o $apiTemp --no-self-contained `
+    --configfile $nugetConfig
 if ($LASTEXITCODE -ne 0) { Pop-Location; exit 1 }
 Pop-Location
-# Swap: remove old api, move api_temp to api
-if (Test-Path $apiDest) {
-    Remove-Item $apiDest -Recurse -Force -ErrorAction Stop
-}
-Move-Item -Path $apiTemp -Destination $apiDest -Force
+Replace-DirectoryPreservingProductionConfig -SourcePath $apiTemp -DestinationPath $apiDest
 
-# Ensure logs folder exists (ANCM needs it for stdout)
 $logsDir = Join-Path $apiDest "logs"
-if (-not (Test-Path $logsDir)) { New-Item -ItemType Directory -Path $logsDir -Force | Out-Null }
+if (-not (Test-Path $logsDir)) {
+    New-Item -ItemType Directory -Path $logsDir -Force | Out-Null
+}
 
-# Ensure web.config has stdout logging (logs folder created above)
-
-# Build frontend
-Write-Host "`n[2/3] Building frontend..." -ForegroundColor Yellow
-Push-Location $ProjectRoot\frontend
+Write-Host "`n[2/4] Building frontend and exporting static site to deploy/web..." -ForegroundColor Yellow
+Push-Location (Join-Path $ProjectRoot "frontend")
 npm run build
 if ($LASTEXITCODE -ne 0) { Pop-Location; exit 1 }
 Pop-Location
+Copy-Item -Path (Join-Path $ProjectRoot "frontend\out") -Destination $webTemp -Recurse -Force
+Replace-DirectoryPreservingProductionConfig -SourcePath $webTemp -DestinationPath $webDest
 
-# Copy frontend into api/wwwroot (single app: API + static frontend)
-Write-Host "`n[3/3] Copying frontend to deploy/api/wwwroot..." -ForegroundColor Yellow
-$outDir = "$ProjectRoot\frontend\out"
-if (-not (Test-Path $outDir)) { Write-Error "Frontend out folder not found. Run 'npm run build' in frontend." }
-$wwwroot = "$apiDest\wwwroot"
-if (Test-Path $wwwroot) { Remove-Item $wwwroot -Recurse -Force }
-Copy-Item -Path $outDir -Destination $wwwroot -Recurse -Force
+Write-Host "`n[3/4] Publishing agent to deploy/agent..." -ForegroundColor Yellow
+Push-Location (Join-Path $ProjectRoot "agent")
+dotnet publish -c Release -o $agentDest --no-self-contained `
+    --configfile $nugetConfig
+if ($LASTEXITCODE -ne 0) { Pop-Location; exit 1 }
+Pop-Location
 
-# Restart site if it was stopped
-try {
-    $site = Get-Website -Name "IIS-Site-Manager" -ErrorAction SilentlyContinue
-    if ($site -and $site.State -ne "Started") {
-        Start-Website -Name "IIS-Site-Manager"
-        Write-Host "Site restarted." -ForegroundColor Green
-    }
-} catch { }
+Write-Host "`n[4/4] Restarting IIS resources if present..." -ForegroundColor Yellow
+Restart-IisIfPresent -SiteName $backendSiteName -PoolName $backendPoolName
+Restart-IisIfPresent -SiteName $frontendSiteName -PoolName $frontendPoolName
 
-Write-Host "`nBuild complete. Run .\setup-iis.ps1 to deploy to IIS (if not already done)." -ForegroundColor Green
+Write-Host "`nBuild complete." -ForegroundColor Green
+Write-Host "  Backend: $apiDest" -ForegroundColor White
+Write-Host "  Frontend: $webDest" -ForegroundColor White
+Write-Host "  Agent: $agentDest" -ForegroundColor White

@@ -15,6 +15,9 @@ deploy/api/logs/
 deploy/api/.appdata/
 deploy/api/.dotnet/
 deploy/api/.templateengine/
+deploy/api_temp/
+deploy/web_temp/
+deploy/.build-cache/
 *.pdb
 
 # Local .NET / NuGet caches
